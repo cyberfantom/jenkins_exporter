@@ -1,6 +1,6 @@
 # Jenkins Exporter
 
-[![Build Status](https://api.travis-ci.org/lovoo/jenkins_exporter.svg?branch=travis_setup)](https://travis-ci.org/lovoo/jenkins_exporter)
+[![Build Status](https://travis-ci.org/cyberfantom/jenkins_exporter.svg?branch=master)](https://travis-ci.org/cyberfantom/jenkins_exporter)
 
 Jenkins exporter for prometheus.io, written in python.
 
@@ -23,12 +23,12 @@ For more information see (http://www.robustperception.io/writing-a-jenkins-expor
 
 #### Example
 
-    docker run -d -p 9118:9118 lovoo/jenkins_exporter:latest -j http://jenkins:8080 -p 9118
+    docker run -d -p 9118:9118 cyberfantom/jenkins_exporter:latest -j http://jenkins:8080 -p 9118
 
 
 ## Installation
 
-    git clone git@github.com:lovoo/jenkins_exporter.git
+    https://github.com/cyberfantom/jenkins_exporter.git
     cd jenkins_exporter
     pip install -r requirements.txt
 
