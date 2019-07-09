@@ -150,6 +150,7 @@ class JenkinsCollector(object):
                                       'Jenkins build pass counts for {0}'.format(status), labels=["jobname"]),
             }
 
+        self._job_runs_metrics = {}
         self._job_runs_metrics = {
             'runs_successful_total': GaugeMetricFamily('jenkins_runs_successful_total', 'Jenkins total job successful runs',
                                                  labels=["jobname"]),
