@@ -1,19 +1,20 @@
 #!/usr/bin/python
 
+import argparse
+import os
 import re
 import time
-import requests
-import argparse
 from pprint import pprint
-
-import os
 from sys import exit
+
+import requests
 from prometheus_client import start_http_server, Summary
 from prometheus_client.core import GaugeMetricFamily, REGISTRY
 
 DEBUG = int(os.environ.get('DEBUG', '0'))
 
 COLLECTION_TIME = Summary('jenkins_collector_collect_seconds', 'Time spent to collect metrics from Jenkins')
+
 
 class JenkinsCollector(object):
     # The build statuses we want to export about.
@@ -46,44 +47,71 @@ class JenkinsCollector(object):
             for metric in self._prometheus_metrics[status].values():
                 yield metric
 
+        for metric in self._job_runs_metrics.values():
+            yield metric
+
         duration = time.time() - start
         COLLECTION_TIME.observe(duration)
+
+    def _api_call(self, url, params):
+        if self._user and self._password:
+            response = requests.get(url, params=params, auth=(self._user, self._password), verify=(not self._insecure))
+        else:
+            response = requests.get(url, params=params, verify=(not self._insecure))
+        if DEBUG:
+            pprint(response.text)
+        if response.status_code != requests.codes.ok:
+            raise Exception("Call to url %s failed with status: %s" % (url, response.status_code))
+        result = response.json()
+        if DEBUG:
+            pprint(result)
+
+        return result
+
+    def parse_job_runs(self, job):
+        workflow_runs = {}
+        if job['_class'] == 'org.jenkinsci.plugins.workflow.job.WorkflowJob':
+            builds = job.get('builds', [])
+            if builds:
+                successful_runs = []
+                failed_runs = []
+                for workflow_run in builds:
+                    wf_data = self._api_call(workflow_run['url'] + 'api/json', {})
+                    if wf_data['result'] == 'SUCCESS':
+                        successful_runs.append(wf_data['number'])
+                    if wf_data['result'] == 'FAILURE':
+                        failed_runs.append(wf_data['number'])
+
+                workflow_runs.update(
+                    {'runs_successful_total': len(successful_runs),
+                     'runs_failed_total': len(failed_runs)})
+                job.update(workflow_runs)
+
+    def parse_jobs(self, url, params):
+        result = self._api_call(url, params)
+        jobs = []
+        for job in result['jobs']:
+            if job['_class'] == 'com.cloudbees.hudson.plugins.folder.Folder' or \
+                    job['_class'] == 'jenkins.branch.OrganizationFolder' or \
+                    job['_class'] == 'org.jenkinsci.plugins.workflow.multibranch.WorkflowMultiBranchProject':
+                jobs += self.parse_jobs(job['url'] + '/api/json', params)
+            else:
+                self.parse_job_runs(job)
+                jobs.append(job)
+        return jobs
 
     def _request_data(self):
         # Request exactly the information we need from Jenkins
         url = '{0}/api/json'.format(self._target)
         jobs = "[fullName,number,timestamp,duration,actions[queuingDurationMillis,totalDurationMillis," \
                "skipCount,failCount,totalCount,passCount]]"
-        tree = 'jobs[fullName,url,{0}]'.format(','.join([s + jobs for s in self.statuses]))
+        tree = 'jobs[fullName,url,builds[url],{0}]'.format(','.join([s + jobs for s in self.statuses]))
         params = {
             'tree': tree,
         }
 
-        def parsejobs(myurl):
-            # params = tree: jobs[name,lastBuild[number,timestamp,duration,actions[queuingDurationMillis...
-            if self._user and self._password:
-                response = requests.get(myurl, params=params, auth=(self._user, self._password), verify=(not self._insecure))
-            else:
-                response = requests.get(myurl, params=params, verify=(not self._insecure))
-            if DEBUG:
-                pprint(response.text)
-            if response.status_code != requests.codes.ok:
-                raise Exception("Call to url %s failed with status: %s" % (myurl, response.status_code))
-            result = response.json()
-            if DEBUG:
-                pprint(result)
-
-            jobs = []
-            for job in result['jobs']:
-                if job['_class'] == 'com.cloudbees.hudson.plugins.folder.Folder' or \
-                   job['_class'] == 'jenkins.branch.OrganizationFolder' or \
-                   job['_class'] == 'org.jenkinsci.plugins.workflow.multibranch.WorkflowMultiBranchProject':
-                    jobs += parsejobs(job['url'] + '/api/json')
-                else:
-                    jobs.append(job)
-            return jobs
-
-        return parsejobs(url)
+        jobs_data = self.parse_jobs(url, params)
+        return jobs_data
 
     def _setup_empty_prometheus_metrics(self):
         # The metrics we want to export.
@@ -106,7 +134,8 @@ class JenkinsCollector(object):
                                       labels=["jobname"]),
                 'totalDurationMillis':
                     GaugeMetricFamily('jenkins_job_{0}_total_duration_seconds'.format(snake_case),
-                                      'Jenkins build total duration in seconds for {0}'.format(status), labels=["jobname"]),
+                                      'Jenkins build total duration in seconds for {0}'.format(status),
+                                      labels=["jobname"]),
                 'skipCount':
                     GaugeMetricFamily('jenkins_job_{0}_skip_count'.format(snake_case),
                                       'Jenkins build skip counts for {0}'.format(status), labels=["jobname"]),
@@ -120,6 +149,13 @@ class JenkinsCollector(object):
                     GaugeMetricFamily('jenkins_job_{0}_pass_count'.format(snake_case),
                                       'Jenkins build pass counts for {0}'.format(status), labels=["jobname"]),
             }
+
+        self._job_runs_metrics = {
+            'runs_successful_total': GaugeMetricFamily('jenkins_runs_successful_total', 'Jenkins total job successful runs',
+                                                 labels=["jobname"]),
+            'runs_failed_total': GaugeMetricFamily('jenkins_runs_failed_total', 'Jenkins total job failed runs',
+                                                 labels=["jobname"]),
+        }
 
     def _get_metrics(self, name, job):
         for status in self.statuses:
@@ -138,9 +174,11 @@ class JenkinsCollector(object):
         actions_metrics = status_data.get('actions', [{}])
         for metric in actions_metrics:
             if metric.get('queuingDurationMillis', False):
-                self._prometheus_metrics[status]['queuingDurationMillis'].add_metric([name], metric.get('queuingDurationMillis') / 1000.0)
+                self._prometheus_metrics[status]['queuingDurationMillis'].add_metric([name], metric.get(
+                    'queuingDurationMillis') / 1000.0)
             if metric.get('totalDurationMillis', False):
-                self._prometheus_metrics[status]['totalDurationMillis'].add_metric([name], metric.get('totalDurationMillis') / 1000.0)
+                self._prometheus_metrics[status]['totalDurationMillis'].add_metric([name], metric.get(
+                    'totalDurationMillis') / 1000.0)
             if metric.get('skipCount', False):
                 self._prometheus_metrics[status]['skipCount'].add_metric([name], metric.get('skipCount'))
             if metric.get('failCount', False):
@@ -150,6 +188,11 @@ class JenkinsCollector(object):
                 # Calculate passCount by subtracting fails and skips from totalCount
                 passcount = metric.get('totalCount') - metric.get('failCount') - metric.get('skipCount')
                 self._prometheus_metrics[status]['passCount'].add_metric([name], passcount)
+
+        if job.get('runs_successful_total', 0):
+            self._job_runs_metrics['runs_successful_total'].add_metric([name], job.get('runs_successful_total'))
+        if job.get('runs_failed_total', 0):
+            self._job_runs_metrics['runs_failed_total'].add_metric([name], job.get('runs_failed_total'))
 
 
 def parse_args():
