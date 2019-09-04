@@ -70,7 +70,8 @@ class JenkinsCollector(object):
 
     def parse_job_runs(self, job):
         workflow_runs = {}
-        if job['_class'] == 'org.jenkinsci.plugins.workflow.job.WorkflowJob':
+        if job['_class'] == 'org.jenkinsci.plugins.workflow.job.WorkflowJob' or \ 
+                job['_class'] == 'hudson.model.FreeStyleProject':
             builds = job.get('builds', [])
             if builds:
                 successful_runs = []
